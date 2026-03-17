@@ -1,64 +1,117 @@
-from __future__ import annotations
-
-import argparse
-from pathlib import Path
-
+import os
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms  # type: ignore
 from torch.utils.data import DataLoader
 
-from drowsiness_detection.data import FolderImageDataset
-from drowsiness_detection.models.cnn import SmallCNN
+# hyperparameters
+BATCH_SIZE = 32
+EPOCHS = 10
+LEARNING_RATE = 0.001
+IMG_SIZE = 64
 
+# paths
+DATA_DIR = os.path.join("data", "raw")
+TRAIN_DIR = os.path.join(DATA_DIR, "Train_Eye")
+VAL_DIR = os.path.join(DATA_DIR, "Validation_Eye")
+MODEL_SAVE_PATH = os.path.join("outputs", "runs", "eye_cnn_model.pth")
 
-def accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:
-    pred = logits.argmax(dim=1)
-    return float((pred == y).float().mean().item())
+# neurl network architecture
+class SimpleEyeCNN(nn.Module):
+    def __init__(self):
+        super(SimpleEyeCNN, self).__init__()
+        self.conv_layer = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2)
+        )
+        self.fc_layer = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(32 * (IMG_SIZE // 4) * (IMG_SIZE // 4), 128),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(128, 2) # 2 classes: Closed (0), Opened (1)
+        )
 
+    def forward(self, x):
+        x = self.conv_layer(x)
+        x = self.fc_layer(x)
+        return x
 
-def main() -> int:
-    p = argparse.ArgumentParser(description="Train a small CNN baseline on folder dataset.")
-    p.add_argument("--data", type=str, default="data/processed", help="Root containing train/(alert|drowsy).")
-    p.add_argument("--epochs", type=int, default=5)
-    p.add_argument("--batch", type=int, default=64)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--out", type=str, default="outputs/runs/cnn_baseline.pt")
-    args = p.parse_args()
+def main():
+    os.makedirs(os.path.dirname(MODEL_SAVE_PATH), exist_ok=True)
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    print(f"Using device: {device}")
 
-    ds = FolderImageDataset(args.data, split="train", image_size=(224, 224))
-    dl = DataLoader(ds, batch_size=args.batch, shuffle=True, num_workers=2, pin_memory=True)
+    # transforms
+    transform = transforms.Compose([
+        transforms.Resize((IMG_SIZE, IMG_SIZE)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+    ])
 
-    model = SmallCNN(num_classes=2).to(args.device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    loss_fn = nn.CrossEntropyLoss()
+    # load data
+    train_dataset = datasets.ImageFolder(root=TRAIN_DIR, transform=transform)
+    val_dataset = datasets.ImageFolder(root=VAL_DIR, transform=transform)
 
-    model.train()
-    for epoch in range(1, args.epochs + 1):
-        losses = []
-        accs = []
-        for x_np, y_np in dl:
-            x = x_np.to(args.device, dtype=torch.float32)
-            y = y_np.to(args.device, dtype=torch.long)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-            opt.zero_grad(set_to_none=True)
-            logits = model(x)
-            loss = loss_fn(logits, y)
+    print(f"Classes: {train_dataset.classes}")
+
+    # initialize model, loss, and optimizer
+    model = SimpleEyeCNN().to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+    # training Loop
+    for epoch in range(EPOCHS):
+        model.train()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+        
+        for images, labels in train_loader:
+            images, labels = images.to(device), labels.to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
             loss.backward()
-            opt.step()
+            optimizer.step()
+            
+            running_loss += loss.item()
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
 
-            losses.append(float(loss.item()))
-            accs.append(accuracy(logits.detach(), y))
+        train_acc = 100 * correct / total
+        
+        # val 
+        model.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images, labels = images.to(device), labels.to(device)
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+                val_loss += loss.item()
+                _, predicted = torch.max(outputs.data, 1)
+                val_total += labels.size(0)
+                val_correct += (predicted == labels).sum().item()
+                
+        val_acc = 100 * val_correct / val_total
+        print(f"Epoch [{epoch+1}/{EPOCHS}] - Train Loss: {running_loss/len(train_loader):.4f}, Train Acc: {train_acc:.2f}% | Val Loss: {val_loss/len(val_loader):.4f}, Val Acc: {val_acc:.2f}%")
 
-        print(f"epoch {epoch:02d} | loss={sum(losses)/len(losses):.4f} | acc={sum(accs)/len(accs):.4f}")
-
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"model": model.state_dict(), "args": vars(args)}, out)
-    print(f"Saved: {out}")
-    return 0
-
+    # save Model
+    torch.save(model.state_dict(), MODEL_SAVE_PATH)
+    print(f"Model saved to {MODEL_SAVE_PATH}")
 
 if __name__ == "__main__":
-    raise SystemExit(main())
-
+    main()
