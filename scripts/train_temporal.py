@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from drowsiness_detection.models.temporal import LSTMClassifier
+from drowsiness_detection.models.temporal import TransformerClassifier
 
 
 def make_windows(x: np.ndarray, y: int, window: int, stride: int) -> tuple[np.ndarray, np.ndarray]:
@@ -65,7 +66,11 @@ def main() -> int:
     x = torch.from_numpy(X).to(args.device)
     y = torch.from_numpy(Y).to(args.device)
 
-    model = LSTMClassifier(feat_dim=X.shape[-1], hidden=128, num_layers=1, num_classes=2).to(args.device)
+
+
+    model = TransformerClassifier(feat_dim=X.shape[-1], embed_dim=64, nhead=4, num_layers=2, num_classes=2).to(
+        args.device
+    )
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_fn = nn.CrossEntropyLoss()
 
