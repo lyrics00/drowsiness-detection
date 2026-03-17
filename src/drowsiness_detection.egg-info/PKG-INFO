@@ -1,3 +1,13 @@
+Metadata-Version: 2.4
+Name: drowsiness-detection
+Version: 0.1.0
+Summary: Real-time driver drowsiness detection via multi-cue facial analysis and temporal deep learning.
+License: MIT
+Requires-Python: <3.13,>=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Dynamic: license-file
+
 ## Drowsiness Detection (CS 4501)
 
 Starter code + project structure for a **real-time driver drowsiness detection** project using:

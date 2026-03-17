@@ -1,0 +1,25 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data / outputs
+data/raw/
+data/processed/
+data/external/
+outputs/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
