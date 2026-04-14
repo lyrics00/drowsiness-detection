@@ -20,7 +20,12 @@ from PIL import Image
 from drowsiness_detection.config import DemoConfig  # type: ignore
 from drowsiness_detection.head_pose import estimate_head_pose_degrees  # type: ignore
 from drowsiness_detection.temporal import TemporalCueTracker  # type: ignore
-from drowsiness_detection.utils.geometry import eye_aspect_ratio, mouth_aspect_ratio  # type: ignore
+from drowsiness_detection.utils.geometry import (  # type: ignore
+    bbox_from_landmarks,
+    eye_aspect_ratio,
+    eye_line_flatness,
+    mouth_aspect_ratio,
+)
 from drowsiness_detection.utils.mediapipe_facemesh import FaceMeshDetector  # type: ignore
 
 
@@ -150,6 +155,31 @@ def draw_text(img: np.ndarray, lines: list[str], x: int = 10, y: int = 25) -> No
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 230, 20), 2, cv2.LINE_AA)
 
 
+def draw_eye_tracker(
+    img: np.ndarray,
+    eye_xy: np.ndarray,
+    label: str,
+    closed: bool,
+) -> None:
+    h, w = img.shape[:2]
+    color = (20, 20, 240) if closed else (20, 230, 20)
+    pts = eye_xy.astype(np.int32).reshape(-1, 1, 2)
+    cv2.polylines(img, [pts], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
+
+    x0, y0, x1, _ = bbox_from_landmarks(eye_xy, w, h, pad=0.55)
+    text_y = max(18, y0 - 6)
+    cv2.putText(
+        img,
+        label,
+        (x0, text_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+
+
 # ===========================================================================
 # Main
 # ===========================================================================
@@ -159,6 +189,7 @@ def main() -> int:
     p.add_argument("--camera",      type=int,   default=0)
     p.add_argument("--ear_closed",  type=float, default=None)
     p.add_argument("--mar_yawn",    type=float, default=None)
+    p.add_argument("--eye_flat",    type=float, default=None)
     p.add_argument("--fps",         type=float, default=None)
     p.add_argument("--eye_weight",  type=float, default=0.6)
     p.add_argument("--face_weight", type=float, default=0.4)
@@ -167,6 +198,11 @@ def main() -> int:
     cfg        = DemoConfig(camera_index=args.camera)
     ear_closed = cfg.ear_closed_thresh if args.ear_closed is None else float(args.ear_closed)
     mar_yawn   = cfg.mar_yawn_thresh   if args.mar_yawn   is None else float(args.mar_yawn)
+    eye_flat   = (
+        cfg.eye_flatness_closed_thresh
+        if args.eye_flat is None
+        else float(args.eye_flat)
+    )
     fps        = cfg.fps_assumed       if args.fps        is None else float(args.fps)
 
     total_w = args.eye_weight + args.face_weight
@@ -230,9 +266,20 @@ def main() -> int:
                 continue
 
             # ---- geometric EAR (always computed) ----
-            geo_ear = float(
-                (eye_aspect_ratio(res.left_eye_xy) + eye_aspect_ratio(res.right_eye_xy)) / 2.0
-            )
+            left_ear_raw = eye_aspect_ratio(res.left_eye_xy)
+            right_ear_raw = eye_aspect_ratio(res.right_eye_xy)
+            left_flat = eye_line_flatness(res.left_eye_xy)
+            right_flat = eye_line_flatness(res.right_eye_xy)
+            left_line_closed = left_flat <= eye_flat
+            right_line_closed = right_flat <= eye_flat
+
+            # Flatness is a diagnostic signal only; it does not drive the alarm path.
+            left_ear = left_ear_raw
+            right_ear = right_ear_raw
+            geo_ear = float((left_ear + right_ear) / 2.0)
+
+            left_eye_signal = left_ear
+            right_eye_signal = right_ear
 
             # ---- EyeCNN: soft blend of CNN prob + geo_ear ----
             eye_signal = geo_ear
@@ -242,12 +289,17 @@ def main() -> int:
             if l_crop.size > 0 and r_crop.size > 0:
                 p_closed_l = get_eye_closed_prob(eye_model, l_crop, eye_tf, device)
                 p_closed_r = get_eye_closed_prob(eye_model, r_crop, eye_tf, device)
-                p_closed   = (p_closed_l + p_closed_r) / 2.0
+                left_eye_signal = cnn_ear(p_closed_l, ear_closed, left_ear)
+                right_eye_signal = cnn_ear(p_closed_r, ear_closed, right_ear)
+                p_closed = (p_closed_l + p_closed_r) / 2.0
 
-                eye_signal = cnn_ear(p_closed, ear_closed, geo_ear)
+                eye_signal = float((left_eye_signal + right_eye_signal) / 2.0)
 
                 state_str  = "Closed" if p_closed > 0.5 else "Open"
                 eye_label  = f"eye:{state_str}(cnn={p_closed:.2f})"
+
+            left_eye_closed = left_eye_signal < ear_closed
+            right_eye_closed = right_eye_signal < ear_closed
 
             # ---- FaceCNN ----
             face_signal = 0.5
@@ -269,7 +321,12 @@ def main() -> int:
             fused_ear = float(np.clip(fused_ear, 0.0, 1.0))
 
             mar   = mouth_aspect_ratio(res.mouth_xy)
-            state = tracker.update(ear=fused_ear, mar=mar)
+            state = tracker.update(
+                ear=fused_ear,
+                mar=mar,
+                left_eye_closed=left_eye_closed,
+                right_eye_closed=right_eye_closed,
+            )
 
             h, w  = frame.shape[:2]
             pose  = estimate_head_pose_degrees((w, h), res.pose_points_2d)
@@ -282,6 +339,19 @@ def main() -> int:
             for pt in np.vstack([res.left_eye_xy, res.right_eye_xy, res.mouth_xy]).astype(np.int32):
                 cv2.circle(frame, tuple(pt.tolist()), 2, (0, 255, 255), -1)
 
+            draw_eye_tracker(
+                frame,
+                res.left_eye_xy,
+                f"L {'CLOSED' if state.left_eye_closed else 'OPEN'}",
+                state.left_eye_closed,
+            )
+            draw_eye_tracker(
+                frame,
+                res.right_eye_xy,
+                f"R {'CLOSED' if state.right_eye_closed else 'OPEN'}",
+                state.right_eye_closed,
+            )
+
             status = "DROWSY" if is_drowsy else "ALERT"
             cv2.putText(frame, status, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
                         1.0, (20, 20, 240) if is_drowsy else (20, 230, 20), 3, cv2.LINE_AA)
@@ -290,6 +360,17 @@ def main() -> int:
                 f"{eye_label}   {face_label}",
                 f"geo:{geo_ear:.3f}  eye:{eye_signal:.3f}  "
                 f"face:{face_signal:.3f}  fused:{fused_ear:.3f}",
+                f"L eye:{left_eye_signal:.3f} flat:{left_flat:.3f} "
+                f"{'CLOSED' if state.left_eye_closed else 'OPEN'} "
+                f" line:{'C' if left_line_closed else 'O'} "
+                f"t:{state.left_eye_closed_seconds:.2f}s",
+                f"R eye:{right_eye_signal:.3f} flat:{right_flat:.3f} "
+                f"{'CLOSED' if state.right_eye_closed else 'OPEN'} "
+                f" line:{'C' if right_line_closed else 'O'} "
+                f"t:{state.right_eye_closed_seconds:.2f}s",
+                f"line closed if flat<={eye_flat:.3f}  "
+                f"(diagnostic only)  "
+                f"L/R PERCLOS:{state.left_perclos:.2f}/{state.right_perclos:.2f}",
                 f"eye_closed={state.is_eye_closed}  (thresh<{ear_closed:.2f})",
                 f"MAR:{state.mar:.3f} (yawn>{mar_yawn:.2f})  yawn_s:{state.yawn_seconds:.2f}",
                 f"PERCLOS({cfg.window_seconds:.0f}s):{state.perclos:.2f}"

@@ -34,6 +34,35 @@ def eye_aspect_ratio(eye_xy: np.ndarray) -> float:
     return (euclidean(p2, p6) + euclidean(p3, p5)) / denom
 
 
+def eye_line_flatness(eye_xy: np.ndarray) -> float:
+    """
+    Measure how closely the eyelid landmarks follow the corner-to-corner baseline.
+
+    Returns a unitless ratio:
+      0.0   -> perfectly flat / closed line
+      larger values -> more vertical separation / more open eye
+    """
+    eye = _to_xy(eye_xy)
+    if eye.shape[0] != 6:
+        raise ValueError("eye_line_flatness expects exactly 6 eye landmarks")
+
+    p1, _, _, p4, _, _ = eye
+    width = euclidean(p1, p4)
+    if width < 1e-6:
+        return 0.0
+
+    interior = eye[[1, 2, 4, 5]]
+    baseline = p4 - p1
+
+    # 2D perpendicular distance from each eyelid point to the eye baseline.
+    cross = (
+        (interior[:, 0] - p1[0]) * baseline[1]
+        - (interior[:, 1] - p1[1]) * baseline[0]
+    )
+    dists = np.abs(cross) / width
+    return float(dists.mean() / width)
+
+
 def mouth_aspect_ratio(mouth_xy: np.ndarray) -> float:
     """
     Simple MAR from 4 landmarks: [left, right, upper, lower]
@@ -83,4 +112,3 @@ def bbox_from_landmarks(
     if y1i <= y0i:
         y1i = min(img_h - 1, y0i + 1)
     return x0i, y0i, x1i, y1i
-
