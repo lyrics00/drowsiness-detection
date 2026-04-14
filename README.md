@@ -60,7 +60,7 @@ Then train:
 python scripts/train_cnn.py --data data/processed --epochs 5
 ```
 
-### Handcrafted feature extraction (for temporal models)
+### Video feature extraction (for temporal models)
 
 Extract per-frame features from a video:
 
@@ -68,7 +68,20 @@ Extract per-frame features from a video:
 python scripts/extract_features_video.py --video path/to/video.mp4 --out_csv data/processed/features/alert/example.csv
 ```
 
-Train an LSTM on feature CSVs placed under:
+For a full experiment, place labeled videos under:
+
+```text
+data/raw/videos/alert/*.mp4
+data/raw/videos/drowsy/*.mp4
+```
+
+Then batch-extract frame-wise EAR, MAR, and head-pose features:
+
+```bash
+python scripts/extract_features_dataset.py --video_root data/raw/videos --out_root data/processed/features
+```
+
+Train temporal models on feature CSVs placed under:
 
 ```text
 data/processed/features/alert/*.csv
@@ -76,7 +89,24 @@ data/processed/features/drowsy/*.csv
 ```
 
 ```bash
-python scripts/train_temporal.py --root data/processed/features --window 30 --stride 5
+python scripts/train_temporal.py --root data/processed/features --window 90 --stride 15 --include_deltas
+```
+
+This trains and compares:
+
+```text
+Transformer over video-frame features
+LSTM baseline
+Mean-pooled MLP baseline
+```
+
+Report-ready artifacts are written to:
+
+```text
+outputs/runs/temporal/summary_metrics.csv
+outputs/runs/temporal/<model>/metrics.json
+outputs/runs/temporal/<model>/history.csv
+outputs/runs/temporal/<model>/*_confusion_matrix.csv
 ```
 
 ### Notes / next steps
