@@ -66,13 +66,18 @@ class TemporalCueTracker:
         ear: float,
         mar: float,
         *,
+        eye_closed_override: bool | None = None,
         left_eye_closed: bool | None = None,
         right_eye_closed: bool | None = None,
     ) -> TemporalState:
         ear = float(ear)
         mar = float(mar)
 
-        eye_closed = ear < self.ear_closed_thresh
+        eye_closed = (
+            (ear < self.ear_closed_thresh)
+            if eye_closed_override is None
+            else bool(eye_closed_override)
+        )
         left_eye_closed = eye_closed if left_eye_closed is None else bool(left_eye_closed)
         right_eye_closed = eye_closed if right_eye_closed is None else bool(right_eye_closed)
 

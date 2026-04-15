@@ -155,6 +155,18 @@ def draw_text(img: np.ndarray, lines: list[str], x: int = 10, y: int = 25) -> No
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 230, 20), 2, cv2.LINE_AA)
 
 
+def update_eye_closed_state(
+    prev_closed: bool,
+    flatness: float,
+    closed_thresh: float,
+    open_thresh: float,
+) -> bool:
+    """Apply simple hysteresis so closure does not flicker near the boundary."""
+    if prev_closed:
+        return flatness < open_thresh
+    return flatness <= closed_thresh
+
+
 def draw_eye_tracker(
     img: np.ndarray,
     eye_xy: np.ndarray,
@@ -189,7 +201,8 @@ def main() -> int:
     p.add_argument("--camera",      type=int,   default=0)
     p.add_argument("--ear_closed",  type=float, default=None)
     p.add_argument("--mar_yawn",    type=float, default=None)
-    p.add_argument("--eye_flat",    type=float, default=None)
+    p.add_argument("--eye_flat", "--eye_flat_closed", dest="eye_flat_closed", type=float, default=None)
+    p.add_argument("--eye_flat_open", type=float, default=None)
     p.add_argument("--fps",         type=float, default=None)
     p.add_argument("--eye_weight",  type=float, default=0.6)
     p.add_argument("--face_weight", type=float, default=0.4)
@@ -198,12 +211,23 @@ def main() -> int:
     cfg        = DemoConfig(camera_index=args.camera)
     ear_closed = cfg.ear_closed_thresh if args.ear_closed is None else float(args.ear_closed)
     mar_yawn   = cfg.mar_yawn_thresh   if args.mar_yawn   is None else float(args.mar_yawn)
-    eye_flat   = (
+    eye_flat_closed = (
         cfg.eye_flatness_closed_thresh
-        if args.eye_flat is None
-        else float(args.eye_flat)
+        if args.eye_flat_closed is None
+        else float(args.eye_flat_closed)
+    )
+    eye_flat_open = (
+        cfg.eye_flatness_open_thresh
+        if args.eye_flat_open is None
+        else float(args.eye_flat_open)
     )
     fps        = cfg.fps_assumed       if args.fps        is None else float(args.fps)
+
+    if eye_flat_open <= eye_flat_closed:
+        raise ValueError(
+            f"--eye_flat_open must be greater than --eye_flat/--eye_flat_closed "
+            f"({eye_flat_open:.3f} <= {eye_flat_closed:.3f})"
+        )
 
     total_w = args.eye_weight + args.face_weight
     eye_w   = args.eye_weight  / total_w
@@ -251,6 +275,9 @@ def main() -> int:
     if not cap.isOpened():
         raise RuntimeError(f"Could not open camera index {cfg.camera_index}")
 
+    left_eye_closed_flat = False
+    right_eye_closed_flat = False
+
     try:
         while True:
             ok, frame = cap.read()
@@ -270,10 +297,20 @@ def main() -> int:
             right_ear_raw = eye_aspect_ratio(res.right_eye_xy)
             left_flat = eye_line_flatness(res.left_eye_xy)
             right_flat = eye_line_flatness(res.right_eye_xy)
-            left_line_closed = left_flat <= eye_flat
-            right_line_closed = right_flat <= eye_flat
+            left_eye_closed_flat = update_eye_closed_state(
+                left_eye_closed_flat,
+                left_flat,
+                eye_flat_closed,
+                eye_flat_open,
+            )
+            right_eye_closed_flat = update_eye_closed_state(
+                right_eye_closed_flat,
+                right_flat,
+                eye_flat_closed,
+                eye_flat_open,
+            )
+            both_eyes_closed_flat = left_eye_closed_flat and right_eye_closed_flat
 
-            # Flatness is a diagnostic signal only; it does not drive the alarm path.
             left_ear = left_ear_raw
             right_ear = right_ear_raw
             geo_ear = float((left_ear + right_ear) / 2.0)
@@ -298,9 +335,6 @@ def main() -> int:
                 state_str  = "Closed" if p_closed > 0.5 else "Open"
                 eye_label  = f"eye:{state_str}(cnn={p_closed:.2f})"
 
-            left_eye_closed = left_eye_signal < ear_closed
-            right_eye_closed = right_eye_signal < ear_closed
-
             # ---- FaceCNN ----
             face_signal = 0.5
             face_label  = "face:n/a"
@@ -324,8 +358,9 @@ def main() -> int:
             state = tracker.update(
                 ear=fused_ear,
                 mar=mar,
-                left_eye_closed=left_eye_closed,
-                right_eye_closed=right_eye_closed,
+                eye_closed_override=both_eyes_closed_flat,
+                left_eye_closed=left_eye_closed_flat,
+                right_eye_closed=right_eye_closed_flat,
             )
 
             h, w  = frame.shape[:2]
@@ -362,19 +397,20 @@ def main() -> int:
                 f"face:{face_signal:.3f}  fused:{fused_ear:.3f}",
                 f"L eye:{left_eye_signal:.3f} flat:{left_flat:.3f} "
                 f"{'CLOSED' if state.left_eye_closed else 'OPEN'} "
-                f" line:{'C' if left_line_closed else 'O'} "
                 f"t:{state.left_eye_closed_seconds:.2f}s",
                 f"R eye:{right_eye_signal:.3f} flat:{right_flat:.3f} "
                 f"{'CLOSED' if state.right_eye_closed else 'OPEN'} "
-                f" line:{'C' if right_line_closed else 'O'} "
                 f"t:{state.right_eye_closed_seconds:.2f}s",
-                f"line closed if flat<={eye_flat:.3f}  "
-                f"(diagnostic only)  "
-                f"L/R PERCLOS:{state.left_perclos:.2f}/{state.right_perclos:.2f}",
-                f"eye_closed={state.is_eye_closed}  (thresh<{ear_closed:.2f})",
+                f"flat hysteresis close<={eye_flat_closed:.3f} "
+                f"open>={eye_flat_open:.3f}  "
+                f"both_closed={state.is_eye_closed}",
+                f"L/R PERCLOS:{state.left_perclos:.2f}/{state.right_perclos:.2f}  "
+                f"overall:{state.perclos:.2f}",
+                f"EAR diag thresh<{ear_closed:.2f}  "
+                f"(signal only, not drowsy gate)",
                 f"MAR:{state.mar:.3f} (yawn>{mar_yawn:.2f})  yawn_s:{state.yawn_seconds:.2f}",
-                f"PERCLOS({cfg.window_seconds:.0f}s):{state.perclos:.2f}"
-                f"  (drowsy>={cfg.perclos_drowsy_thresh:.2f})",
+                f"PERCLOS driven by flatness ({cfg.window_seconds:.0f}s)"
+                f"  drowsy>={cfg.perclos_drowsy_thresh:.2f}",
                 f"Blink:{state.blink_rate_per_min:.1f}/min",
             ]
             if pose is not None:

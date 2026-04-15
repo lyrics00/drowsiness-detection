@@ -16,6 +16,7 @@ class DemoConfig:
     ear_closed_thresh: float = 0.21
     mar_yawn_thresh: float = 0.65
     eye_flatness_closed_thresh: float = 0.035
+    eye_flatness_open_thresh: float = 0.045
 
     # Decision thresholds
     perclos_drowsy_thresh: float = 0.40  # % of frames "eyes closed" within window
